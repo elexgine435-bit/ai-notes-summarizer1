@@ -10,7 +10,7 @@ import re
 
 import streamlit as st
 
-from utils.ai_engine import DEFAULT_MODELS, AIEngine, AIEngineError, was_truncated
+from utils.ai_engine import DEFAULT_MODELS, EXPLAIN_STYLES, AIEngine, AIEngineError, was_truncated
 from utils.pdf_reader import PDFReadError, extract_text_from_pdf
 
 st.set_page_config(
@@ -25,12 +25,13 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 PAGE_HOME = "🏠 Home"
 PAGE_SUMMARY = "📝 Summary"
+PAGE_EXPLAIN = "📖 Explained Notes"
 PAGE_POINTS = "⭐ Important Points"
 PAGE_MCQ = "❓ MCQ Quiz"
 PAGE_CHAT = "💬 Ask Your Notes"
 PAGE_CARDS = "🃏 Flashcards"
 PAGE_DOWNLOADS = "⬇️ Downloads"
-PAGES = [PAGE_HOME, PAGE_SUMMARY, PAGE_POINTS, PAGE_MCQ, PAGE_CHAT, PAGE_CARDS, PAGE_DOWNLOADS]
+PAGES = [PAGE_HOME, PAGE_SUMMARY, PAGE_EXPLAIN, PAGE_POINTS, PAGE_MCQ, PAGE_CHAT, PAGE_CARDS, PAGE_DOWNLOADS]
 
 # ---------------------------------------------------------------------------
 # Styling (CSS)
@@ -132,7 +133,11 @@ DEFAULTS = {
     "bad_id": None,
     "bad_message": "",
     "summary_length": "Medium",
+    "summary_level": "Normal",
     "summary": "",
+    "explained": "",
+    "explain_style": "Mixed (best)",
+    "explain_level": "Normal",
     "points": "",
     "mcqs": [],
     "mcq_submitted": False,
@@ -144,7 +149,7 @@ DEFAULTS = {
 }
 
 # These are cleared whenever a new document is uploaded.
-RESULT_KEYS = ["summary", "points", "mcqs", "mcq_submitted", "flashcards", "fc_index", "fc_show", "chat"]
+RESULT_KEYS = ["summary", "explained", "points", "mcqs", "mcq_submitted", "flashcards", "fc_index", "fc_show", "chat"]
 
 
 def init_state():
@@ -298,7 +303,7 @@ def chat_to_text(chat):
 
 def build_study_pack():
     s = st.session_state
-    sections = [("SUMMARY", s.summary), ("IMPORTANT POINTS", s.points)]
+    sections = [("SUMMARY", s.summary), ("EXPLAINED NOTES", s.explained), ("IMPORTANT POINTS", s.points)]
     if s.mcqs:
         sections.append(("MCQ PRACTICE QUESTIONS", mcqs_to_text(s.mcqs)))
     if s.flashcards:
@@ -349,7 +354,8 @@ def render_sidebar():
 # Pages
 # ---------------------------------------------------------------------------
 FEATURES = [
-    ("📝", "AI Summary", "Short, medium or detailed summaries in simple English, organised with headings.", PAGE_SUMMARY),
+    ("📝", "AI Summary", "Short, medium or lengthy summaries in easy, normal or hard language, organised with headings.", PAGE_SUMMARY),
+    ("📖", "Explained Notes", "Your whole PDF explained part by part, in different teaching styles.", PAGE_EXPLAIN),
     ("⭐", "Important Points", "Key concepts, definitions and key terms pulled out of your notes.", PAGE_POINTS),
     ("❓", "MCQ Quiz", "Practice questions with four options, correct answers and short explanations.", PAGE_MCQ),
     ("💬", "Ask Your Notes", "Chat with your PDF. Answers come only from your own material.", PAGE_CHAT),
@@ -445,18 +451,28 @@ def render_home():
 
 
 def render_summary():
-    page_header("📝", "AI Summary", "Choose how long you want your summary to be.")
+    page_header("📝", "AI Summary", "Choose how long and how difficult you want your summary to be.")
     require_document()
     engine = require_engine()
-    note_if_truncated()
 
-    st.radio("Summary length", ["Short", "Medium", "Detailed"], key="summary_length", horizontal=True)
-    st.caption("Short: quick overview. Medium: main topics. Detailed: full explanation with a recap.")
+    left, right = st.columns(2)
+    with left:
+        st.radio("Summary length", ["Short", "Medium", "Lengthy"], key="summary_length", horizontal=True)
+    with right:
+        st.radio("Language level", ["Easy", "Normal", "Hard"], key="summary_level", horizontal=True)
+    st.caption(
+        "Short: quick overview. Medium: main topics. Lengthy: full explanation with a recap.  \n"
+        "Easy: simple words for beginners. Normal: student level. Hard: technical, detailed language."
+    )
 
     if st.button("Generate summary", type="primary"):
         result = run_ai(
-            lambda: engine.summarize(st.session_state.doc_text, st.session_state.summary_length),
-            "Writing your summary...",
+            lambda: engine.summarize(
+                st.session_state.doc_text,
+                st.session_state.summary_length,
+                st.session_state.summary_level,
+            ),
+            "Writing your summary... long notes can take up to a minute.",
         )
         if result:
             st.session_state.summary = result
@@ -465,6 +481,50 @@ def render_summary():
         with st.container(border=True):
             st.markdown(st.session_state.summary)
         download_button("Download summary (TXT)", st.session_state.summary, "summary", "dl_summary_page")
+
+
+def render_explain():
+    page_header("📖", "Explained Notes", "Your whole PDF explained properly, part by part, in different teaching styles.")
+    require_document()
+    engine = require_engine()
+
+    left, right = st.columns(2)
+    with left:
+        st.selectbox("Explanation style", list(EXPLAIN_STYLES), key="explain_style")
+    with right:
+        st.radio("Language level", ["Easy", "Normal", "Hard"], key="explain_level", horizontal=True)
+    st.caption(
+        "Your notes are read from the start to the end, one part after the other, so nothing is skipped. "
+        "**Mixed (best)** uses a different way of explaining for each topic: examples, analogies, "
+        "steps, tables and mini questions. Long notes can take a few minutes."
+    )
+
+    if st.button("Explain my notes", type="primary"):
+        bar = st.progress(0.0, text="Starting...")
+        live = st.empty()
+
+        def update(done, total, text_so_far):
+            bar.progress(done / total, text=f"Explained part {done} of {total}")
+            live.markdown(text_so_far)
+
+        result = run_ai(
+            lambda: engine.explain_notes(
+                st.session_state.doc_text,
+                st.session_state.explain_style,
+                st.session_state.explain_level,
+                progress=update,
+            ),
+            "Explaining your notes part by part...",
+        )
+        bar.empty()
+        live.empty()
+        if result:
+            st.session_state.explained = result
+
+    if st.session_state.explained:
+        with st.container(border=True):
+            st.markdown(st.session_state.explained)
+        download_button("Download explained notes (TXT)", st.session_state.explained, "explained_notes", "dl_explain_page")
 
 
 def render_points():
@@ -497,9 +557,10 @@ def render_mcq():
     page_header("❓", "MCQ Quiz", "Test your knowledge with questions made from your notes.")
     require_document()
     engine = require_engine()
-    note_if_truncated()
 
-    count = st.slider("Number of questions", min_value=3, max_value=15, value=5)
+    count = st.slider("Number of questions", min_value=3, max_value=30, value=5)
+    if count > 10:
+        st.caption("More than 10 questions are made in batches, so this can take up to a minute.")
     if st.button("Generate MCQs", type="primary"):
         result = run_ai(lambda: engine.generate_mcqs(st.session_state.doc_text, count), "Creating your questions...")
         if result:
@@ -595,9 +656,10 @@ def render_cards():
     page_header("🃏", "Flashcards", "Study one card at a time. Try to answer before you flip it.")
     require_document()
     engine = require_engine()
-    note_if_truncated()
 
-    count = st.slider("Number of flashcards", min_value=5, max_value=20, value=10)
+    count = st.slider("Number of flashcards", min_value=5, max_value=40, value=10)
+    if count > 15:
+        st.caption("More than 15 flashcards are made in batches, so this can take up to a minute.")
     if st.button("Generate flashcards", type="primary"):
         result = run_ai(lambda: engine.generate_flashcards(st.session_state.doc_text, count), "Making your flashcards...")
         if result:
@@ -644,6 +706,7 @@ def render_downloads():
 
     items = [
         ("Summary", s.summary, "summary"),
+        ("Explained notes", s.explained, "explained_notes"),
         ("Important points", s.points, "important_points"),
         ("MCQs with answers", mcqs_to_text(s.mcqs) if s.mcqs else "", "mcqs"),
         ("Flashcards", flashcards_to_text(s.flashcards) if s.flashcards else "", "flashcards"),
@@ -677,6 +740,7 @@ render_sidebar()
 PAGE_FUNCTIONS = {
     PAGE_HOME: render_home,
     PAGE_SUMMARY: render_summary,
+    PAGE_EXPLAIN: render_explain,
     PAGE_POINTS: render_points,
     PAGE_MCQ: render_mcq,
     PAGE_CHAT: render_chat,
